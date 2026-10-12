@@ -165,16 +165,16 @@ maven-mastery-lab/
 
 ## Roadmap
 
-| Module                                       | Topic                                                         |
-|----------------------------------------------|---------------------------------------------------------------|
-| [`01-maven-recap`](01-maven-recap/README.md) | pom, coordinates, scopes, lifecycle, plugins, wrapper         |
-| `02-dependency-management`                   | `dependencyManagement`, parent POM, BOM, `pluginManagement`   |
-| `03-transitive-resolution`                   | nearest-wins, exclusions, scope mediation, conflict diagnosis |
-| `04-repositories-settings`                   | `~/.m2`, Central, mirrors, `settings.xml`, SNAPSHOT repos     |
-| `05-properties-profiles-versions`            | properties, profiles, SNAPSHOT vs release, versioning         |
-| `06-multi-module-reactor`                    | aggregator vs parent, reactor order, `-pl`/`-am`              |
-| `07-cli-and-ci-in-practice`                  | day-to-day commands, surefire vs failsafe, CI                 |
-| `08-capstone`                                | migrate one of your own projects to a clean Maven build       |
+| Module                                                 | Topic                                                         |
+|--------------------------------------------------------|---------------------------------------------------------------|
+| [`01-maven-recap`](01-maven-recap/README.md)           | pom, coordinates, scopes, lifecycle, plugins, wrapper         |
+| [`02-dependency-management`](02-dependency-management/README.md) | `dependencyManagement`, parent POM, BOM, `pluginManagement`   |
+| `03-transitive-resolution`                             | nearest-wins, exclusions, scope mediation, conflict diagnosis |
+| `04-repositories-settings`                             | `~/.m2`, Central, mirrors, `settings.xml`, SNAPSHOT repos     |
+| `05-properties-profiles-versions`                      | properties, profiles, SNAPSHOT vs release, versioning         |
+| `06-multi-module-reactor`                              | aggregator vs parent, reactor order, `-pl`/`-am`              |
+| `07-cli-and-ci-in-practice`                            | day-to-day commands, surefire vs failsafe, CI                 |
+| `08-capstone`                                          | migrate one of your own projects to a clean Maven build       |
 
 ---
 
