@@ -1,0 +1,72 @@
+# .github/workflows/build.yml
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR branch).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (JDK ${{ matrix.java }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest ]
+        java: [ '17' ]          # bump to add '21' once the lab targets it
+        # windows-latest verifies mvnw.cmd — uncomment when you want cross-OS coverage
+        # os: [ ubuntu-latest, windows-latest ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          # Caches ~/.m2/repository keyed on pom.xml hashes — the
+          # cheapest, safest Maven cache for this repo.
+          cache: maven
+
+      - name: Ensure Maven Wrapper is executable
+        if: runner.os != 'Windows'
+        run: chmod +x mvnw
+
+      - name: Show toolchain versions
+        run: |
+          java -version
+          ./mvnw -v
+        shell: bash
+
+      - name: Build and verify
+        # -B  batch mode (no ANSI, no interactive prompts) — CI-safe
+        # -ntp no transfer progress — keeps logs readable
+        # verify runs unit tests + any failsafe ITs (README DoD)
+        run: ./mvnw -B -ntp -Dstyle.color=always clean verify
+        shell: bash
+
+      - name: Upload test reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-jdk${{ matrix.java }}-${{ matrix.os }}
+          path: |
+            **/target/surefire-reports/**
+            **/target/failsafe-reports/**
+          if-no-files-found: ignore
+          retention-days: 7
