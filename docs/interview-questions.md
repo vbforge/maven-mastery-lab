@@ -99,8 +99,6 @@ deletes the whole `target/` directory first.
 
 ---
 
-
-
 ## 02 · dependency-management
 
 ### Q1. `dependencies` vs `dependencyManagement` — and why does it matter for a multi-module build?
@@ -297,6 +295,178 @@ the origin, run `./mvnw help:evaluate -Dexpression=assertj.version -q -DforceStd
 in each module to see which value each context resolves to.
 
 ---
+
+## 03 · transitive-resolution
+
+### Q1. What is a transitive dependency, and how does Maven decide which version to use when several paths reach the same artifact?
+
+**Answer.** A **transitive dependency** is a dependency of a dependency: if
+your project declares `A` and `A` declares `B`, then `B` is on your classpath
+even though you never wrote it in your pom. Only `compile` and `runtime` scoped
+dependencies propagate this way — `provided`, `test` and `system` do not.
+
+When the same artifact (`groupId:artifactId`) is reachable along several paths,
+Maven picks one version using **nearest-wins**:
+
+1. Compute the depth of each path (edges from the root project).
+2. The path with the **smallest depth** wins.
+3. **Tie** at the same depth → the one **declared first** wins. "First" means
+   the order of the direct dependencies in the root pom, then the order of
+   that dependency's own `<dependencies>`, and so on.
+
+The winning version goes on the classpath; every other version is *omitted*
+from the resolved graph. `mvn dependency:tree -Dverbose` prints those
+omissions explicitly:
+
+```
+\- com.example:lib-b:jar:1.0.0:compile
+\- (com.example:shared:jar:2.0.0:compile - omitted for conflict with 1.0.0)
+```
+
+To **override** nearest-wins without touching the graph, declare the wanted
+version explicitly at depth 1 (a direct dependency) or in your
+`<dependencyManagement>` — an explicit declaration always beats a transitive
+one.
+
+### Q2. Explain scope mediation, with an example.
+
+**Answer.** When your project depends on `B` at scope **P**, and `B` depends
+on `C` at scope **Q**, the scope of `C` as *you* see it is `mediate(P, Q)`,
+not `Q`. This is **scope mediation**.
+
+| your scope on B ↓ / B's scope on C → | compile | provided | runtime | test |
+|---|---|---|---|---|
+| **compile**  | compile | – | runtime | – |
+| **provided** | provided | – | provided | – |
+| **runtime**  | runtime | – | runtime | – |
+| **test**     | test | – | test | – |
+
+`–` means **dropped**: Maven does not pull `C` into your project at all.
+
+Examples:
+
+- `compile` on `B`, `B` has `C` at `compile` → you get `C` at `compile`. ✅
+- `compile` on `B`, `B` has `C` at `runtime` → you get `C` at `runtime`
+  (JDBC drivers arrive exactly this way).
+- `compile` on `B`, `B` has `C` at `provided` → **dropped**. `B` assumed the
+  runtime would supply `C`; you must declare it yourself if you need it.
+- `compile` on `B`, `B` has `C` at `test` → **dropped**. Test dependencies
+  never travel.
+- `test` on `B`, `B` has `C` at `compile` → you get `C` at `test`. `B` is
+  test-only for you, and so is everything it brings in.
+
+The key rule: **a `test`, `provided` or `system` child scope is never
+propagated**. A `compile` or `runtime` child scope is propagated, but the
+resulting scope is at most as broad as the parent's.
+
+### Q3. `<exclusions>` vs `<optional>` — when do you use each?
+
+**Answer.** They look similar but control opposite directions of the graph:
+
+- **`<exclusions>`** sit *inside* a `<dependency>` in *your* pom and describe
+  what you refuse to **receive** from that specific dependency. They do not
+  affect what *consumers* of your artifact see. Use them when a library
+  transitively brings something you do not want — a second logging backend,
+  an old JSON parser, a conflicting SLF4J binding.
+- **`<optional>true</optional>`** marks one of *your* dependencies as not
+  passed on to **consumers** of your artifact. It does not change your own
+  classpath. Use it when your library *uses* a dependency internally (an
+  optional integration, a plugin, a driver) but the consumer should not
+  inherit it unless they explicitly ask.
+
+A one-line way to remember: **exclusion is what you don't want to receive;
+optional is what you don't want to give.**
+
+There is also `<scope>provided</scope>`, which looks similar to `<optional>`
+for compile-classpath purposes but says something different ("the runtime
+container supplies this") and does *not* let the consumer opt in. For "the
+consumer might want this", the right tool is `<optional>true</optional>` and
+the consumer re-declares the dependency explicitly.
+
+### Q4. You get a `NoSuchMethodError` in production that never appears locally. Walk through how you would diagnose it.
+
+**Answer.** `NoSuchMethodError`, `ClassNotFoundException`, and
+`AbstractMethodError` in production almost always mean **a dependency clash**:
+the classpath at runtime has an *older* version of a library than the one your
+code was compiled against — often because two libraries each pulled a
+different version and nearest-wins picked the wrong one.
+
+Diagnostic sequence:
+
+1. **Reproduce on a clean checkout.** `./mvnw clean verify` from scratch — is
+   a stale local `~/.m2` shadowing a SNAPSHOT? Run with `-U` to force
+   re-resolution.
+2. **Print the resolved tree**: `./mvnw dependency:tree -Dverbose`. Look for
+   `omitted for conflict with` and `version managed from` lines. The version
+   that is *not* on the classpath is often the one your code was compiled
+   against.
+3. **Confirm the runtime classpath.** `./mvnw dependency:build-classpath
+   -Dmdep.outputFile=cp.txt` and diff local vs. CI vs. production.
+4. **Find who brings the wrong version**:
+   `./mvnw dependency:tree -Dincludes=com.foo:the-lib`. Two versions → you
+   have a conflict.
+5. **Fix it in one of three ways**, least to most invasive:
+    - Pin the correct version in `<dependencyManagement>` (best when the
+      version is needed project-wide).
+    - Declare the correct version as a direct dependency (nearest-wins then
+      picks it).
+    - `<exclusion>` the wrong version from the one dependency that pulls it
+      (only when you need the rest of that dependency's transitives).
+6. **Prevent it next time** with Enforcer `dependencyConvergence` (fails the
+   build if any artifact resolves to multiple versions) and by running
+   `dependency:analyze` in CI.
+
+The root cause is usually one artifact whose *major* version silently changed.
+`-Dverbose` is the tool that makes the omission visible.
+
+### Q5. How would you enforce a consistent dependency tree across a multi-module build?
+
+**Answer.** Three layers, cheapest first:
+
+1. **Centralise versions in the parent's `<dependencyManagement>`.** Every
+   child declares `<groupId>:<artifactId>` with no version; one bump in the
+   parent moves the whole build. Combine with a BOM import for third-party
+   families (`junit-bom`, `jackson-bom`, `spring-boot-dependencies`) so you
+   don't hand-maintain dozens of versions.
+
+2. **Fail the build on convergence problems** with
+   `maven-enforcer-plugin`:
+
+   ```xml
+   <plugin>
+       <groupId>org.apache.maven.plugins</groupId>
+       <artifactId>maven-enforcer-plugin</artifactId>
+       <executions>
+           <execution>
+               <goals><goal>enforce</goal></goals>
+               <configuration>
+                   <rules>
+                       <dependencyConvergence/>
+                   </rules>
+               </configuration>
+           </execution>
+       </executions>
+   </plugin>
+   ```
+
+`dependencyConvergence` fails the build if any artifact resolves to more
+than one version *after* mediation. It's the safety net for the
+`NoSuchMethodError` class of bugs.
+
+3. **Detect dead and missing declarations** with `./mvnw dependency:analyze`:
+    - *Used undeclared* — your code uses an artifact that only arrives
+      transitively. It could disappear on the next dependency bump; declare it
+      directly.
+    - *Unused declared* — you declare something you never use. Remove it.
+
+Add all three to CI (`./mvnw -B verify`) so a bad version bump fails the
+build instead of production. In a multi-module build, the parent pom is the
+single place to change; the Enforcer plugin and `dependency:analyze` are the
+single place to *prove* the change was safe.
+
+---
+
+
 
 
 

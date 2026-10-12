@@ -10,6 +10,14 @@
 
 ---
 
+## Quick links to modules:
+
+ - [`01-maven-recap`](01-maven-recap/README.md)
+ - [`02-dependency-management`](02-dependency-management/README.md)
+ - [`03-transitive-resolution`](03-transitive-resolution/README.md)
+
+---
+
 ## Goal
 
 Be able to answer, **and demonstrate**, every Maven question a Junior → Middle Java developer gets in an interview or on a real project:
@@ -169,7 +177,7 @@ maven-mastery-lab/
 |--------------------------------------------------------|---------------------------------------------------------------|
 | [`01-maven-recap`](01-maven-recap/README.md)           | pom, coordinates, scopes, lifecycle, plugins, wrapper         |
 | [`02-dependency-management`](02-dependency-management/README.md) | `dependencyManagement`, parent POM, BOM, `pluginManagement`   |
-| `03-transitive-resolution`                             | nearest-wins, exclusions, scope mediation, conflict diagnosis |
+| [`03-transitive-resolution`](03-transitive-resolution/README.md)                             | nearest-wins, exclusions, scope mediation, conflict diagnosis |
 | `04-repositories-settings`                             | `~/.m2`, Central, mirrors, `settings.xml`, SNAPSHOT repos     |
 | `05-properties-profiles-versions`                      | properties, profiles, SNAPSHOT vs release, versioning         |
 | `06-multi-module-reactor`                              | aggregator vs parent, reactor order, `-pl`/`-am`              |
@@ -349,6 +357,9 @@ cd maven-mastery-lab
 
 # only the tasks of a module (after removing @Disabled)
 ./mvnw test -pl 01-maven-recap -Dtest=MavenTasksTest
+
+# before commit - sanity check (command locally once)
+mvn -B -ntp clean verify
 ```
 
 On Windows use `mvnw.cmd` instead of `./mvnw`.
