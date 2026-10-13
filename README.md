@@ -8,6 +8,8 @@
 > A hands-on lab that takes you from "I can run `mvn install`" to "I can design, debug and explain a real multi-module Maven build".
 > **Java 17+** | **Maven 3.9+ (via wrapper)** | Package root: `com.vbforge`
 
+🌐 **[Interactive Roadmap →](https://vbforge.github.io/maven-mastery-lab/)**
+
 ---
 
 ## Quick links to modules:
