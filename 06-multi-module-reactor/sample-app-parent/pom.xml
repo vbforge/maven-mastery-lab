@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.vbforge</groupId>
+        <artifactId>maven-mastery-lab</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <!-- three levels up: sample-app/ → 06-multi-module-reactor/ → repo root -->
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>sample-app-parent</artifactId>
+    <packaging>pom</packaging>
+    <name>sample-app-parent</name>
+    <description>A nested mini multi-module build to experiment on</description>
+
+    <modules>
+        <module>sample-core</module>
+        <module>sample-service</module>
+        <module>sample-app</module>
+    </modules>
+
+</project>

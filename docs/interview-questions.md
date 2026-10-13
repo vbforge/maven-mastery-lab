@@ -790,5 +790,161 @@ the parent's version specifically.
 
 ---
 
+## 06 · multi-module-reactor
+
+### Q1. What is the Maven reactor, and how is build order determined?
+
+**Answer.** The **reactor** is the set of modules Maven is currently building
+in one invocation, plus the order it processes them in. It is not a
+configuration element — it is a computed result of the aggregator pom's
+`<modules>` tree plus each module's internal dependencies.
+
+Build order is a **topological sort** of the inter-module dependency graph. A
+module is built only after every module it depends on (transitively). Ties
+between modules that are both "ready to build next" are broken by
+**declaration order** — the module listed first in `<modules>` wins. This is
+why the reactor order is deterministic across runs and machines.
+
+The order is *not* the order the modules appear in `<modules>`. If you list
+`app, service, core` but `app → service → core`, the reactor still builds
+`core → service → app`. Maven prints the resulting order in the
+`Reactor Build Order:` block at the start of every build — read that log line
+whenever a multi-module build surprises you.
+
+Cycles are forbidden: if A depends on B and B depends on A, there is no valid
+order and Maven fails at validation, before compiling anything.
+
+### Q2. Difference between an aggregator and a parent pom — and can one pom be both?
+
+**Answer.** Two orthogonal roles:
+
+- **Aggregator** — a `pom`-packaged module that declares `<modules>`. Its
+  job: "when you build me, build these together". It shares no configuration.
+  An aggregator with no children is legal and common: it is just a build
+  entry point.
+- **Parent** — a pom that other modules reference in their `<parent>` block.
+  Its job: share properties, `dependencyManagement`, `pluginManagement`,
+  repositories, plugins. A parent has no opinion about what gets built
+  together — a module that inherits from it is not automatically in its
+  reactor.
+
+Yes, one pom can play both roles, and the root pom of this lab does. That is
+convenient but conflates two concerns: a real codebase sometimes splits them
+into a "build-all" aggregator and a separate "company-parent" that other
+projects (not in the same reactor) also inherit from.
+
+The distinction matters when debugging: an aggregator-only pom is often the
+top of a CI job's build, but nothing inherits its configuration — the modules
+get their settings from whichever pom is in their `<parent>` block, which may
+be a completely different artifact. Aggregator-only is precisely: `packaging =
+pom` **and** `<modules>` non-empty **and** no children.
+
+### Q3. What do `-pl`, `-am`, `-amd` and `-rf` do, and when would you use each?
+
+**Answer.** Four flags that select a slice of the reactor:
+
+| Flag | Meaning | Typical use |
+|---|---|---|
+| `-pl <ids>` | "project list" — build only these modules | run tests for just the module you changed |
+| `-am` | "also make" — add every module the target depends on (transitively) | build one module **and its upstream deps**, when the deps are not installed |
+| `-amd` | "also make dependents" — add every module that depends on the target | run the *whole downstream* after changing a shared library |
+| `-rf <id>` | "resume from" — skip modules until `<id>` is reached, then continue to the end | restart a failed build without re-running everything upstream |
+
+The everyday combinations:
+
+```bash
+# iteration on one module while its deps are already installed
+./mvnw -pl my-service test
+
+# a clean machine: build the service and everything it needs, no more
+./mvnw -pl my-service -am clean verify
+
+# changed a shared library: prove nothing downstream broke
+./mvnw -pl my-core -amd clean verify
+
+# a failure in my-service stopped a full build; resume
+./mvnw clean verify -rf my-service
+```
+
+`-pl` alone frequently fails on a fresh checkout because Maven cannot resolve
+the inter-module dependencies — they are not in `~/.m2` yet. `-am` is the
+standard fix. `-amd` is the CI-safety command after touching a low-level
+module: it builds the target *and* proves every consumer still compiles.
+
+### Q4. How do you keep one version across all modules of a multi-module project?
+
+**Answer.** Two approaches, from most manual to most ergonomic:
+
+1. **Hand-maintained `<version>` in every pom.** Works, but every version
+   bump requires editing every module's pom *and* every inter-module
+   dependency — high risk of "one module stayed on the old version".
+
+2. **CI-friendly versions via `${revision}`.** The version coordinate becomes
+   a property:
+
+   ```xml
+   <version>${revision}</version>
+
+   <properties>
+       <revision>1.0.0-SNAPSHOT</revision>
+       <sha1/>
+       <changelist/>
+   </properties>
+   ```
+
+   A single `./mvnw -Drevision=2.0.0 clean deploy` sets the version of every
+   module in the build. Only `${revision}`, `${sha1}` and `${changelist}` are
+   recognised by Maven itself; the property **must** have a default (or be
+   passed on the CLI), otherwise Maven fails before the build starts — a
+   deliberate guard against accidentally resolving a literal `${revision}`.
+
+   Inter-module dependencies use `${project.version}` (which resolves to the
+   current module's version — the same for every module by construction) and
+   follow automatically.
+
+3. **`versions:set -DnewVersion=X -DprocessAllModules=true`** — the pragmatic
+   middle ground for a project that is not yet `${revision}`-ready. Without
+   `-DprocessAllModules=true`, only the top-level pom changes and child
+   modules keep the old version, typically breaking inter-module dependency
+   resolution on the next build.
+
+### Q5. `mvn validate` fails with "The projects in the reactor contain a cyclic reference". What does it mean, and how do you fix it?
+
+**Answer.** The reactor must be a **DAG** (directed acyclic graph). The error
+means two or more modules form a cycle — A depends on B, B depends on A (or a
+longer chain A → B → C → A) — and there is no valid build order. Maven detects
+this at validation, before compiling anything, and prints the cycle path:
+
+```
+[ERROR] The projects in the reactor contain a cyclic reference:
+        The projects com.x:a, com.x:b, com.x:c constitute a cycle.
+```
+
+The error message is the diagnosis: the listed modules are the cycle.
+
+**How to fix it** — in order of preference:
+
+1. **Extract the shared piece into a third module.** If A and B both need the
+   same class/config, neither should own it. Extract it into `common` and
+   make both A and B depend on `common`. This is almost always the correct
+   fix, because a cycle usually indicates two modules that should never have
+   been separated.
+
+2. **Invert one edge via an interface.** If A → B → A only because B needs
+   to call back into A, define an interface in A, have A depend on B, and let
+   B take an instance of the interface — the compile-time dependency then
+   points one way only.
+
+3. **Split a module.** If the cycle is really one module that has grown to
+   contain two roles, split it so each role lives in its own module and only
+   one direction of the dependency remains.
+
+Fixing a cycle by "reorder the `<modules>` list" is impossible — the reactor
+order is computed, not declared. Fixing it by moving a class between modules
+usually works but tends to create the same cycle again six months later. The
+durable fix is a shared module for the shared piece.
+
+---
+
 
 
