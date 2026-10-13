@@ -946,5 +946,231 @@ durable fix is a shared module for the shared piece.
 
 ---
 
+## 07 · cli-and-ci-in-practice
+
+### Q1. `verify` vs `install` — and which is the right default for CI?
+
+**Answer.** Both run the same default lifecycle up to a different phase:
+
+| Phase the command reaches | Phases run | Writes to `~/.m2`? |
+|---|---|---|
+| `clean verify` | `validate → compile → test → package → verify` | ❌ |
+| `clean install` | `validate → compile → test → package → verify → install` | ✅ |
+
+`install` is `verify` plus one extra step: copy the built artifact into the
+local repository so other projects on the same machine can consume it. For a
+single-module project, the practical difference is invisible — the build
+either succeeds or fails identically. For a multi-module project, it matters:
+if you run `install` on the aggregator, every module gets copied to `~/.m2`,
+which is what lets a *later* `-pl <module>` build resolve the inter-module
+dependencies.
+
+**The right default for CI is `clean verify`.** Reasons:
+
+1. **No side effects.** The local repository is a developer convenience, not
+   a build output. A CI job that populates `~/.m2` on a shared runner can
+   accidentally feed stale artifacts into the *next* job on the same agent.
+2. **Reproducibility.** A build that depends on artifacts previously
+   `install`ed into `~/.m2` is not hermetic — you cannot be sure it works on
+   a truly clean machine. `verify` builds strictly from the sources and the
+   remote repositories.
+3. **Speed.** `install` copies jars you do not need, and can trigger
+   `_remote.repositories` bookkeeping on every run.
+
+Use `install` locally during iterative development when you want a dependent
+project to pick up the new version, or in the *last* step of a genuinely
+multi-JVM CI pipeline where downstream jobs on other machines need the
+artifact.
+
+### Q2. `-DskipTests` vs `-Dmaven.test.skip=true` — what is the difference, and when would you use each?
+
+**Answer.** They sound identical; they are not.
+
+| Flag | Compiles `src/test/java`? | Runs tests? | Use case |
+|---|---|---|---|
+| `-DskipTests` | ✅ yes | ❌ no | "I trust the tests pass, just give me the artifact fast" |
+| `-Dmaven.test.skip=true` | ❌ no | ❌ no | "Get me past a broken test source file" or a build that has no tests at all |
+
+`-DskipTests` still binds the `test` phase and invokes
+`maven-surefire-plugin:test` — the plugin then skips its own execution
+based on the property. The compiler plugin runs normally, so **a syntax
+error in a test file still fails the build**. That is a feature, not a bug:
+you catch compile-time test breakage without paying the wall-clock cost of
+running the tests.
+
+`-Dmaven.test.skip=true` also tells `maven-compiler-plugin:testCompile` to
+skip its execution. Nothing under `src/test/java` is even parsed, so a
+broken test source file is silently ignored.
+
+**Which to use:**
+
+- **Local iteration on non-test code**: `-DskipTests` is usually the right
+  choice — you want the compiler to keep checking the tests.
+- **A "package only" CI job that definitely runs tests in another job**:
+  `-Dmaven.test.skip=true` is acceptable if that job runs on a machine with
+  no test infrastructure (no DB, no Docker) and you are intentionally
+  producing an artifact to be tested elsewhere.
+- **Almost never both.** If you find yourself wanting `-Dmaven.test.skip=true`
+  on `main`, you are probably hiding something that should be fixed.
+
+There is also `-DskipITs`, which is the failsafe-only equivalent of
+`-DskipTests`: unit tests still run, integration tests are skipped.
+
+### Q3. You want a `ClassNotFoundException` / `NoSuchMethodError` to fail the build instead of showing up at runtime. What do you add to CI?
+
+**Answer.** Two complementary checks, both bound to the `verify` phase so
+they run before `install`/`deploy`:
+
+1. **`maven-enforcer-plugin` with `dependencyConvergence`.** This fails the
+   build whenever the same artifact resolves to more than one version in the
+   reactor. That is exactly the class of problem that produces
+   `NoSuchMethodError` at runtime: two libraries pulled different versions,
+   nearest-wins picked an older one, and the code compiled against the newer
+   API. The rule makes the build fail *now*, on the version-conflict, rather
+   than at 3 a.m. in production.
+
+   ```xml
+   <plugin>
+       <groupId>org.apache.maven.plugins</groupId>
+       <artifactId>maven-enforcer-plugin</artifactId>
+       <version>3.4.1</version>
+       <executions>
+           <execution>
+               <goals><goal>enforce</goal></goals>
+               <configuration>
+                   <rules>
+                       <dependencyConvergence/>
+                       <requireMavenVersion><version>[3.9,)</version></requireMavenVersion>
+                       <requireJavaVersion><version>[17,)</version></requireJavaVersion>
+                   </rules>
+               </configuration>
+           </execution>
+       </executions>
+   </plugin>
+   ```
+
+2. **`dependency:analyze`** (either as a CI step or bound to `verify`).
+   Reports two categories:
+    - *Used undeclared* — your code compiles against an artifact that only
+      arrives transitively. It works today because a dependency happens to
+      pull it in; the day that dependency stops doing so, your build breaks
+      (or the *runtime* does). The fix is to declare it explicitly.
+    - *Unused declared* — you declare something you never use. Removing it
+      slims the graph and reduces the chance of a future conflict.
+
+   ```bash
+   ./mvnw -B -ntp dependency:analyze
+   ```
+
+   `dependency:analyze` does not fail the build by default; add
+   `<failOnWarning>true</failOnWarning>` or check the output in a script.
+
+Together, these two make "the classpath is coherent and honest" a **build
+invariant**, not an after-the-fact diagnosis. That is the difference between
+a project that only ever has `NoSuchMethodError` bugs on Fridays, and one
+that does not have them at all.
+
+### Q4. You have a 12-module reactor, and CI is slow. Walk through the levers, cheapest first.
+
+**Answer.** In order of effort-to-payoff:
+
+1. **Cache `~/.m2/repository`.** In GitHub Actions this is one keyword on
+   `actions/setup-java@v4`: `cache: maven`. Key is derived from
+   `**/pom.xml`, so any pom change invalidates it cleanly. On a cold runner
+   the first build downloads hundreds of megabytes from Central — often
+   60–90 % of wall-clock time. This is almost always the single biggest win,
+   and it is free.
+
+2. **Parallelise with `-T 1C`.** Maven builds independent reactor modules
+   concurrently, respecting inter-module dependencies. On a typical 4-core
+   CI runner, a 12-module reactor is 2–4× faster. The reactor log remains
+   readable because every line is prefixed with the module id. Caveats:
+   plugins that shell out to shared resources (a single DB, a fixed port)
+   may not be thread-safe; test on a branch first.
+
+3. **Trim the graph.** `./mvnw dependency:analyze` finds unused declared
+   dependencies. Each one removed is one less artifact to download, one
+   less conflict to resolve, one less thing that can break.
+
+4. **Split the CI pipeline.** Run the fast stuff (compile, unit tests) on
+   every push; run the slow stuff (integration tests, package, deploy) on
+   merge to `main`. A `mvn -pl <module> -am test` on a PR is often minutes
+   faster than a full `verify`.
+
+5. **Push the slow stuff out of Maven.** If a test spins up Docker
+   containers or hits a remote service, it is rarely a `mvn` problem. It is
+   an infrastructure problem. Move it to a dedicated job with its own cache
+   and its own timeout.
+
+6. **Do not add `-q` to CI just to "make it quiet".** `-q` hides warnings
+   that would otherwise tell you what is slow. Use `-B -ntp` for readable
+   logs, and only add `-q` if the log volume is genuinely a problem for
+   the log-storage backend.
+
+7. **Never add `-X` to CI.** Debug output is hundreds of megabytes per run,
+   hides the actual errors, and slows the build. `-X` is a local diagnosis
+   tool.
+
+### Q5. How would you configure `surefire` and `failsafe` for a project that has both unit and integration tests?
+
+**Answer.** Two plugins, two phases, two naming conventions. The correct
+config is minimal because the defaults are already what you want:
+
+```xml
+<build>
+    <plugins>
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <version>3.2.5</version>
+            <executions>
+                <execution>
+                    <goals>
+                        <goal>integration-test</goal>
+                        <goal>verify</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
+</build>
+```
+
+What this does:
+
+- **surefire** runs at the `test` phase, picking up `*Test` / `*Tests` /
+  `Test*` / `*TestCase`. You do not need to declare it — the default
+  lifecycle binds it.
+- **failsafe** runs at the `integration-test` phase (which is between
+  `package` and `verify`) and picks up `*IT` / `IT*` / `*ITCase`. You **do**
+  need to declare it, because the failsafe plugin is not part of the default
+  lifecycle. The second goal, `verify`, is what actually **fails the build**
+  if an integration test failed — the `integration-test` goal runs the tests
+  but does not fail the build (so that post-test cleanup can run).
+
+The naming convention matters because it is what separates the two:
+
+| Class name | Picked up by | Runs at |
+|---|---|---|
+| `FooTest` | surefire | `test` |
+| `FooIT` | failsafe | `integration-test` (between `package` and `verify`) |
+
+This matters for CI because:
+
+- `./mvnw test` runs only unit tests — fast feedback during development.
+- `./mvnw verify` runs unit **and** integration tests — the CI default.
+- `./mvnw -DskipITs verify` runs unit tests but not integration tests —
+  useful when a dependency (e.g. a database) is unavailable but you still
+  want the rest of `verify`.
+
+And it is why `verify` — not `test` — is the correct CI phase. `mvn test`
+would silently skip every `*IT` class.
+
+---
+
+
+
+
+
 
 
