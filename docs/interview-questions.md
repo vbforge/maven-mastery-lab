@@ -1168,6 +1168,160 @@ would silently skip every `*IT` class.
 
 ---
 
+## 08 · capstone
+
+> Meta-questions — the kind a senior interviewer asks when they want to know
+> whether you have ever *owned* a build, not just used one.
+
+### Q1. You inherit a Java project with a Maven build nobody fully understands. Walk me through your first two days with it.
+
+**Answer.** In order, and without changing anything yet:
+
+**Day 1 — understand the current state.**
+
+1. **Clone it fresh and build it.** `git clone`, then run whatever the
+   README says. If the README is silent, try `./mvnw clean verify`, then
+   `mvn clean verify`. Note every step that is not obvious from the pom.
+2. **Read the root pom top-to-bottom.** Note the packaging (`pom` =
+   aggregator/parent), the `<modules>`, the `<parent>` block, the
+   `<properties>`, `<dependencyManagement>`, `<build>`. Do not fix
+   anything — just inventory.
+3. **`./mvnw validate`** — this triggers reactor setup without compiling.
+   Read the `Reactor Build Order:` block. Understand the dependency chain
+   between modules.
+4. **`./mvnw dependency:tree -Dverbose`** — save the output. This is the
+   ground truth of what is on every classpath. Grep for `omitted for
+   conflict with` and `version managed from` — every hit is a decision
+   someone made, intentionally or not.
+5. **`./mvnw help:effective-pom -Doutput=effective.xml`** — this is what
+   Maven actually builds with, after inheritance, BOM imports, and active
+   profiles. Diff it against the source poms to see what the ancestors add.
+6. **`./mvnw help:active-profiles`** — which profiles fire on a default
+   build, and why.
+7. **`./mvnw dependency:analyze`** — the two lists (used undeclared, unused
+   declared) are your backlog.
+8. **Check the git history of the poms.** `git log --follow pom.xml` shows
+   who changed what and when. A version bump that came with a comment is
+   worth more than one that did not.
+
+**Day 2 — plan the migration.**
+
+9. **Write down the problems you found**, ordered by risk and effort. Not
+   by "how hard to fix" but by "how likely this is to break the build when
+   we touch it". Move the wrapper to the top of the list (its change is
+   invisible and irreversible in the good way — nothing breaks by using
+   the wrapper). Move scope tightening to the bottom (highest risk of
+   uncovering a hidden dependency).
+10. **Do the wrapper first.** Commit it. Push it. Get CI green on the
+    unchanged project. That gives you a known-good baseline.
+11. **Then move versions to `dependencyManagement`.** One library at a
+    time, each in its own commit. Run `verify` after each. If the version
+    shifts a transitive dependency, `dependency:tree -Dverbose` tells you
+    which one, and you can decide whether it is a bug fix or a regression.
+12. **Then tighten scopes.** Again one at a time. A compile-time failure
+    here is a *good* outcome — it means the code was relying on something
+    that should never have been on the compile classpath.
+13. **Then add the checks** — Enforcer `dependencyConvergence`,
+    `dependency:analyze` in CI, failsafe for ITs.
+
+**The two rules that make this safe:**
+
+- **One change per commit.** The git history of the poms is the migration
+  log. A future engineer bisects it, not the write-up.
+- **CI green between every commit.** If the build goes red, revert and
+  retry differently. Do not stack fixes.
+
+By the end of day 2 you have a baseline, a prioritised backlog, and the
+first few commits. Day 3+ is execution against that backlog.
+
+### Q2. How do you decide which versions to pin, which to leave managed by a BOM, and which to leave to transitive resolution?
+
+**Answer.** Three tiers, in order of preference:
+
+**Tier 1 — managed by an upstream BOM, do not pin.**
+If a library family publishes a BOM that is compatible as a set (JUnit,
+Jackson, Spring Boot, Netty), import it in the parent's
+`<dependencyManagement>` and delete every version you were pinning by hand.
+The BOM's whole point is that the versions are known to work together; your
+hand-pinned version is a bet that you know better than the maintainers.
+That bet is occasionally correct — it usually is not.
+
+**Tier 2 — explicitly pinned in your `dependencyManagement`.**
+Use this for artifacts that:
+- Have no upstream BOM, or whose BOM you are deliberately not importing
+  (usually because it drags in more than you want).
+- Are "the boring ones" — logging, commons, a specific JSON library.
+- You deliberately hold at an older version because a newer one broke you.
+  Document *why* in the pom as a comment on the managed version; a
+  "pinned for a reason" version is a debt, and debt needs a note.
+
+**Tier 3 — left to transitive resolution, do not manage.**
+Genuinely small utilities that come along for the ride and that you never
+use directly — `byte-buddy` via Mockito, `error_prone_annotations` via
+Guava. You should not name them in your pom at all. If
+`dependency:analyze` reports one as "used undeclared", it graduates to Tier
+2. If it is "unused declared", remove it.
+
+**The decision rule in one sentence:** manage any artifact that your code
+imports directly, or that a risk assessment says could be a problem at
+runtime (logging, codecs, security-sensitive libs). Leave the rest to the
+BOM or the transitive graph.
+
+**The failure mode to avoid** is "manage everything" — pinning every
+transitive dependency to a specific version. This defeats the purpose of
+using a well-maintained library: you no longer get its bug fixes or its
+security patches. And it makes `dependency:analyze` noise out of a clean
+graph. Pinning is a scalpel, not a hammer.
+
+### Q3. What is a Maven build's "definition of done"? How do you know when a project's build is production-grade?
+
+**Answer.** A production-grade Maven build satisfies these properties, all
+of which are observable without reading the pom:
+
+1. **Reproducible.** `git clone` + `./mvnw -B -ntp clean verify` succeeds
+   on a machine that has never had Maven installed. Same Java version, same
+   Maven version, same result — everywhere.
+2. **Hermetic.** The build does not depend on anything in a developer's
+   `~/.m2` that is not reproducible from the sources plus Maven Central (or
+   the configured mirrors). The classic test: clean a fresh
+   `-Dmaven.repo.local=/tmp/m2-test` directory and build again.
+3. **Coherent.** `dependency:tree` shows one version of each artifact — no
+   `omitted for conflict` unless the omission is intentional and
+   documented. Enforcer's `dependencyConvergence` rule passes.
+4. **Honest.** `dependency:analyze` reports no "used undeclared" (nothing
+   compiles against a transitive) and no "unused declared" (nothing is
+   listed but never referenced). Each remaining warning has a one-line
+   justification.
+5. **Tested.** Unit tests, integration tests, and anything else you
+   actually run are all *binding* — a failure breaks the build. `mvn test`
+   is fast; `mvn verify` is complete; the difference is intentional and
+   documented.
+6. **Gate-kept.** A CI workflow runs `./mvnw -B -ntp clean verify` on
+   every push and pull request, blocks merges on failure, and caches
+   `~/.m2/repository` so the check is fast enough that nobody wants to
+   bypass it.
+7. **Documented.** The README says, in one line, how to build the project
+   and what the standard commands are. Nothing about Maven is tribal
+   knowledge on this team.
+8. **Reversible.** Any change to the build is a single commit, revertible
+   in isolation. When a version bump breaks the build, `git revert` gets
+   you back to green without thinking.
+
+**What production-grade does *not* mean:** elaborate custom plugins, a
+ten-file Maven configuration, dozens of active profiles, or a hand-rolled
+dependency resolver. Every property above is achievable with the standard
+plugins, a single parent pom, and the wrapper. If a build feels complex, it
+is almost always because someone solved a problem the standard tool
+already solved — the fastest fix is usually deleting the custom code and
+using the default.
+
+The single best proxy: **would you be comfortable being paged about this
+build at 3 a.m.?** If the answer is no — because you do not understand how
+it produces its output, or because it depends on a machine you have never
+seen — it is not production-grade yet.
+
+---
+
 
 
 
