@@ -608,11 +608,187 @@ missing credentials in the runner's `settings.xml`.
 
 ---
 
+## 05 · properties-profiles-versions
 
+### Q1. What is the difference between a property, a profile, and a version, and how do the three fit together?
 
+**Answer.** They are three orthogonal mechanisms that happen to meet in the
+pom:
 
+- A **property** (`<properties><foo>bar</foo></properties>`) is a named string
+  used anywhere in the pom as `${foo}`. It is a *substitution* mechanism —
+  no condition, no scope. Custom properties live in the pom; built-ins like
+  `${project.version}` and `${project.basedir}` come from Maven itself.
+- A **profile** is a conditional slice of pom — extra properties,
+  dependencies, plugins, repositories — that applies only when its activation
+  rules fire. It is a *condition* mechanism.
+- A **version** is the artifact's `version` coordinate. It is what tells
+  consumers which release of your artifact they are depending on.
 
+They fit together in the classic pattern:
 
+```xml
+<properties>
+    <assertj.version>3.25.3</assertj.version>       <!-- property -->
+</properties>
+
+<profiles>
+    <profile>
+        <id>ci</id>
+        <activation><property><name>env.CI</name></property></activation>
+        <properties>
+            <assertj.version>3.26.0</assertj.version>  <!-- override -->
+        </properties>
+    </profile>
+</profiles>
+
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>       <!-- property use -->
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+```
+
+A version is *where* the value goes; a property is *how* it is written once;
+a profile is *when* the property changes. Three orthogonal mechanisms, one
+pom.
+
+### Q2. What does resource filtering do, and what is the standard foot-gun?
+
+**Answer.** **Resource filtering** substitutes `${...}` placeholders inside
+files under `src/main/resources` (and `src/test/resources`) during the
+`process-resources` phase, on the way to `target/classes`. The same
+substitution as pom properties, applied to *files* — most commonly used to
+bake `${project.version}`, an environment endpoint, or a profile-controlled
+flag into `application.properties`.
+
+Enable it per resource directory:
+
+```xml
+<build>
+    <resources>
+        <resource>
+            <directory>src/main/resources</directory>
+            <filtering>true</filtering>
+        </resource>
+    </resources>
+</build>
+```
+
+The foot-gun is enabling filtering on **the whole** `src/main/resources`
+directory when some of it contains binary files (fonts, keystores, images) or
+literal `${...}` strings that are *not* Maven placeholders — e.g. Freemarker
+templates, `@Value("${some.spring.property}")` snippets, or SQL with `${var}`
+variables. Filtering will substitute or corrupt them.
+
+The standard fix is **two resource blocks**: one with `filtering=true` for the
+files that should be interpolated, one with `filtering=false` for everything
+else, with `<includes>` / `<excludes>` carving out the split. Never use a
+single blanket `<filtering>true</filtering>` unless you have audited every
+file under `src/main/resources`.
+
+### Q3. How does profile activation work, and what does `activeByDefault` actually mean?
+
+**Answer.** A profile is active if **any** of its activation rules fire, or if
+its id is passed with `-P`:
+
+| Source | Rule | Notes |
+|---|---|---|
+| CLI | `-P <id>` | highest priority; the one you control from a shell |
+| `activeByDefault` | `<activeByDefault>true</activeByDefault>` | active only when **no** `-P` is given |
+| JDK | `<jdk>17</jdk>` | prefix match against the running JDK version |
+| OS | `<os><name>Linux</name></os>` | exact match (case-sensitive) |
+| Property | `<property><name>env</name><value>prod</value></property>` | fires when the property is set (and matches, if a value is given) |
+| File | `<file><exists>...</exists></file>` | presence/absence of a file |
+
+The important subtlety: **`activeByDefault` is disabled the moment any
+profile is activated with `-P` (or by another activation source)**. Maven
+assumes "the user has chosen a profile deliberately, so drop the fallback".
+This is why the common "dev is default, prod via `-Pprod`" pattern works — and
+why mixing `activeByDefault` with auto-activating rules (JDK, OS, property)
+can leave you with a `dev` profile that is silent even though the pom says it
+should be on.
+
+Diagnose with `./mvnw help:active-profiles` (lists what is active and *why*)
+and `./mvnw help:all-profiles` (lists everything, active or not).
+
+### Q4. Compare `SNAPSHOT` and release versions, and explain what "CI-friendly versions" are.
+
+**Answer.** A **SNAPSHOT** version (`1.0.0-SNAPSHOT`) is mutable: every deploy
+to the snapshot repository overwrites the same logical GAV, and Maven updates
+`maven-metadata.xml` so consumers know a newer build exists. `-U` forces
+Maven to re-check that metadata. The suffix is **case-sensitive** — only
+`-SNAPSHOT` (uppercase) is a Maven SNAPSHOT; `1.0.0-snapshot` is a normal,
+immutable release version.
+
+A **release** version (`1.0.0`) is immutable: Maven will not re-download it
+once it is in `~/.m2`, and the release repository is expected to reject an
+overwrite. This immutability is why the two live in different repositories:
+snapshots go to a mutable repo, releases to a release-only repo (Central,
+Nexus "releases", etc.). Reproducibility depends on a release GAV always
+resolving to the same bytes.
+
+**CI-friendly versions** move the version out of the coordinates and into a
+property, so a single `-D` on the command line sets the version of a whole
+multi-module build:
+
+```xml
+<version>${revision}</version>
+
+<properties>
+    <revision>1.0.0-SNAPSHOT</revision>
+    <sha1/>
+    <changelist/>
+</properties>
+```
+
+Then `./mvnw -Drevision=1.2.3 clean deploy` publishes every module at
+`1.2.3`, with no pom edits. Only `${revision}`, `${sha1}` and
+`${changelist}` are recognised by Maven itself. The default value *must* be
+present (or the property must be set on the CLI), otherwise Maven fails before
+the build starts — this is a deliberate guard against accidentally building
+with a literal `${revision}` on the classpath.
+
+### Q5. You are asked to move a version bump across a multi-module project. Which tooling and which commands?
+
+**Answer.** Three layers, cheapest first:
+
+1. **Centralise the version in the parent's `<dependencyManagement>` (or a
+   `<properties>` entry referenced from there).** One edit, all modules follow
+   on the next build. This is where the version *should* live for any shared
+   library — no tooling needed.
+
+2. **Use `versions:` for the mechanical parts:**
+    - `./mvnw versions:display-dependency-updates` — list newer versions of
+      every dependency, transitive-safe.
+    - `./mvnw versions:display-plugin-updates` — same for plugins.
+    - `./mvnw versions:update-properties` — bump every `<properties>` entry
+      that is out of date (with `-DincludeProperties=...` to restrict).
+    - `./mvnw versions:update-parent` — bump the parent reference.
+    - `./mvnw versions:set -DnewVersion=2.0.0 -DprocessAllModules=true` — set
+      the project version of *every* module in a multi-module build in one
+      shot. Without `-DprocessAllModules=true`, only the top-level pom changes
+      and child modules keep the old version, which typically breaks
+      inter-module dependencies.
+
+3. **CI-friendly versions (`${revision}`)** — if the project is set up this
+   way, a single `./mvnw -Drevision=2.0.0 clean deploy` sets the version of
+   every module without any tool needing to rewrite pom files. This is the
+   most reliable approach on CI, because nothing in the working tree needs to
+   be modified before `deploy`.
+
+For inter-module dependency versions inside a multi-module build, remember
+that `<version>${project.version}</version>` propagates automatically as long
+as modules are declared in the same reactor — but the moment one module is
+built standalone, the property resolves to the module's own version, which is
+not necessarily the parent's. Use `${project.parent.version}` when you need
+the parent's version specifically.
+
+---
 
 
 
