@@ -466,6 +466,149 @@ single place to *prove* the change was safe.
 
 ---
 
+## 04 · repositories-settings
+
+### Q1. Where does Maven look for an artifact, and in what order?
+
+**Answer.** For every artifact Maven needs, it walks a fixed lookup chain and
+stops at the first hit:
+
+1. **Local repository** — `~/.m2/repository` by default (overridable with
+   `-Dmaven.repo.local=...` or `<localRepository>` in `settings.xml`). Always
+   consulted first. No network involved.
+2. **A mirror of the repository** that declares the artifact — if a
+   `<mirror>`'s `mirrorOf` pattern matches the repository's id, the mirror's
+   URL **replaces** the repository's URL (it is not an "additional" repo).
+3. **The repository's own URL** — when no mirror matched.
+4. **Fail** with `Could not resolve dependencies` / `Non-resolvable import POM`
+   / `ArtifactNotFoundException`, naming the repositories it tried.
+
+The local repository and every remote repository use the **same directory
+layout**:
+
+```
+<base>/<groupId with dots → slashes>/<artifactId>/<version>/<artifactId>-<version>.<ext>
+```
+
+so a Central URL is the local path with an HTTP base in front:
+`https://repo.maven.apache.org/maven2/com/vbforge/foo/1.0.0/foo-1.0.0.jar`.
+
+### Q2. What is a mirror, and how does `mirrorOf` work?
+
+**Answer.** A **mirror** replaces one or more repositories with a different
+URL. It is configured in `~/.m2/settings.xml` (per-developer / per-CI) — never
+in the pom, because "route everything through our Nexus" is not a property of
+the project.
+
+`mirrorOf` patterns (all case-insensitive on the id, case-sensitive on the
+literal tokens):
+
+| Pattern | Matches |
+|---|---|
+| `*` | every repository |
+| `external:*` | every repo whose URL is not `localhost` or `file://` |
+| `central` | exactly the repository with id `central` |
+| `central,spring-milestones` | any of the listed ids |
+| `*,!my-internal` | everything except `my-internal` (negation wins) |
+
+If two mirrors match the same repository, **the first one in `settings.xml`
+wins** — same as Maven itself. Negation (`!id`) is checked across the whole
+pattern: if any `!id` names the repo, the whole `mirrorOf` does not match,
+regardless of how many positive parts matched.
+
+Three common real uses: a corporate proxy (`mirrorOf=*`), a faster local
+mirror of Central, or blocking an unwanted repo (`mirrorOf=bad-repo` mapped to
+a known-good URL).
+
+### Q3. What does `SNAPSHOT` mean, and how do SNAPSHOT repositories differ from release repositories?
+
+**Answer.** A `SNAPSHOT` version — e.g. `1.0.0-SNAPSHOT` — is a **mutable,
+in-development** version. Every time the producing project deploys, Maven
+overwrites the artifact with a timestamped file (`foo-1.0.0-20240101.120000-1.jar`)
+and updates `maven-metadata.xml` in the same directory. Consumers re-check
+that metadata, which is why `-U` exists: to force Maven to look for a *newer*
+SNAPSHOT when the local copy still looks up-to-date.
+
+The suffix is **case-sensitive**: Maven only treats `-SNAPSHOT` (uppercase) as
+a snapshot. `1.0.0-snapshot` is an ordinary release version.
+
+A repository can independently enable or disable releases and snapshots:
+
+```xml
+<releases><enabled>true</enabled></releases>
+<snapshots><enabled>false</enabled></snapshots>
+```
+
+Central has snapshots **disabled** — deliberately. Public repos should not
+serve mutable artifacts, because reproducibility depends on a given GAV always
+resolving to the same bytes. SNAPSHOTs belong on a private repo (Nexus /
+Artifactory) reachable only by the teams that need them.
+
+`release` versions on the other hand are treated as immutable. Maven will
+*not* re-download a release already present locally, even with `-U` — the
+local copy is trusted once fetched (barring checksum mismatches).
+
+### Q4. Difference between `-o` and `-U` — and what happens if you use both?
+
+**Answer.** They are not opposites; they act on different stages of the lookup.
+
+- **`-o` (offline)** — Maven must not touch the network at all. Every
+  artifact must already be in `~/.m2/repository`, or the build fails with
+  `Cannot access central in offline mode`. Useful on a plane, in an air-gapped
+  CI runner after a warm `~/.m2`, or to prove "the build genuinely does not
+  need the network".
+- **`-U` (force update)** — Maven re-checks **SNAPSHOT metadata and release
+  metadata** (e.g. `maven-metadata.xml` for version ranges and `LATEST` /
+  `RELEASE`) against remote repositories, ignoring whatever it has cached.
+  Useful when a colleague deployed a fresh `-SNAPSHOT` and your build keeps
+  using the stale one.
+
+If you pass both, **`-o` wins**: offline means "no network calls at all", so
+there is nothing to update. Maven silently ignores `-U` in that case.
+
+Neither flag re-downloads a fully-resolved release artifact: once a
+`1.0.0` jar is in the local repository, `-U` will not fetch it again. If you
+genuinely need a re-fetch, delete the artifact directory or add
+`-Dmaven.repo.local=/tmp/m2-empty` for the run.
+
+### Q5. You see `Could not resolve dependencies` / `Non-resolvable import POM` in CI. Walk through the diagnosis.
+
+**Answer.** The error means Maven exhausted its lookup chain without finding
+the artifact. Diagnose in this order:
+
+1. **Read the full error block.** Maven prints the artifact it could not
+   resolve, the version, and — importantly — the list of repositories it
+   tried. That list is the key: if only `central` appears and you expect
+   `corp-nexus`, the settings on the CI runner are wrong.
+2. **Check the settings in effect.** `./mvnw help:effective-settings` on the
+   CI runner (or `-X` and grep for `settings.xml`) — is the corporate mirror
+   actually being loaded? Is `settings.xml` in `~/.m2/settings.xml` on the
+   runner, or passed with `-s`? Is the credentials `<server>` id matching the
+   `<mirror>` id?
+3. **Check the repository is enabled for the version.** A `-SNAPSHOT` in a
+   repo with `<snapshots><enabled>false</enabled></snapshots>` — or a release
+   in a repo with `<releases><enabled>false</enabled></releases>` — is
+   invisible to Maven. This is the single most common cause of "the URL is
+   right, the network works, but Maven says it can't find it".
+4. **Run with `-X` and grep for the artifact's URL.** `./mvnw -X
+   dependency:resolve | grep "the-lib"` — you will see exactly which URL was
+   requested and what the server replied (200, 404, 401, timeout). A 401 is
+   credentials; a 404 is wrong path or wrong version; a timeout is a firewall.
+5. **Test resolution in isolation.** `./mvnw dependency:get -Dartifact=g:a:v
+   -DremoteRepositories=id::default::https://...`. This bypasses the pom
+   entirely and proves whether the artifact is fetchable from a specific URL.
+6. **Beware the "works on my machine" trap.** Your local `~/.m2` might
+   contain the artifact from an old download — the CI is a *clean* runner and
+   is failing to fetch it. `./mvnw -o -U` on your machine reproduces the CI
+   behaviour without touching the network.
+
+The fix is usually one of: add/patch a repository in the pom, fix the
+`mirrorOf` pattern, enable snapshots on the snapshot repo, or supply the
+missing credentials in the runner's `settings.xml`.
+
+---
+
+
 
 
 

@@ -21,7 +21,7 @@
         <module>01-maven-recap</module>
         <module>02-dependency-management</module>
         <module>03-transitive-resolution</module>
-        <!-- <module>04-repositories-settings</module> -->
+        <module>04-repositories-settings</module>
         <!-- <module>05-properties-profiles-versions</module> -->
         <!-- <module>06-multi-module-reactor</module> -->
         <!-- <module>07-cli-and-ci-in-practice</module> -->
