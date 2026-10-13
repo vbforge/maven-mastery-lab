@@ -1,12 +1,12 @@
-## sample-app
+## sample-app-parent
 
-**real nested multi-module project** (`sample-app/`)
+**real nested multi-module project** (`sample-app-parent/`)
 to experiment on. It is *not* part of the root reactor — it is a fully
 independent mini build that lives inside module 06's folder purely as a lab subject. Invoke it explicitly:
 
 ```bash
-# build the nested sample-app (separate reactor!)
-cd 06-multi-module-reactor/sample-app
+# build the nested sample-app-parent (separate reactor!)
+cd 06-multi-module-reactor/sample-app-parent
 ../../mvnw clean verify
 
 ```
@@ -17,7 +17,7 @@ so Maven never scans its subfolders for other poms).
 
 ---
 
-## The `sample-app/` mini build
+## The `sample-app-parent/` mini build
 
 Three modules, three roles:
 
@@ -27,36 +27,12 @@ Three modules, three roles:
 | `sample-service` | uses `Greeter`, has a test that proves it | `sample-core` |
 | `sample-app` | a `main()` that exercises `GreetingService` | `sample-service` |
 
-Build order is `core → service → app`. Try `-pl`, `-am`, `-amd` on it — the
-LAB walks you through it.
-
----
-
-# sample-app — a nested mini multi-module build
-
-A completely self-contained Maven reactor with three modules. It lives inside
-`06-multi-module-reactor/` but is **not** part of the root reactor — the root
-pom never references it. Build it explicitly:
-
-```bash
-cd 06-multi-module-reactor/sample-app
-../../mvnw clean verify
-```
-
-## Why this exists
-
 It is the subject of module 06's `LAB.md`. The three modules form the simplest
 possible reactor with a meaningful dependency chain, so every reactor concept
 (build order, `-pl`/`-am`/`-amd`/`-rf`, cycles) can be demonstrated on real
 Maven output instead of a toy in-code graph.
 
-## Modules
-
-| Module | Role | Depends on |
-|---|---|---|
-| `sample-core` | library — a `Greeter` and a JUnit test | — |
-| `sample-service` | uses `Greeter`, has a test proving the dependency works | `sample-core` |
-| `sample-app` | a `main()` that prints a greeting | `sample-service` |
+---
 
 ## Reactor build order
 
@@ -96,7 +72,7 @@ still appears in the reactor log, because it is the aggregator.
 
 ## Design notes / why I made these choices
 
-- **`sample-app/` is a nested, self-contained reactor.** It is *not* in the root `<modules>`, so the root build never touches it. This preserves the "one module = one folder" convention from 01–05, and makes the sample-app a safe scratchpad: if a learner breaks it (e.g. introduces a cycle in the LAB), the root `./mvnw verify` is unaffected.
+- **`sample-app-parent/` is a nested, self-contained reactor.** It is *not* in the root `<modules>`, so the root build never touches it. This preserves the "one module = one folder" convention from 01–05, and makes the sample-app a safe scratchpad: if a learner breaks it (e.g. introduces a cycle in the LAB), the root `./mvnw verify` is unaffected.
 - **`<relativePath>../../pom.xml</relativePath>`** — verified against Maven's semantics: the path is relative to the pom.xml's *directory*, and the parent lives two levels up (`sample-app/` → `06-multi-module-reactor/` → repo root). Inheriting from the root reuses the pinned Java 17 and JUnit/AssertJ versions, so the sample-app doesn't duplicate config.
 - **LAB exercise 2 deliberately fails** (`-pl sample-service` alone). This is the single most common multi-module gotcha in practice and worth seeing once, in a controlled setting.
 - **LAB exercise 6's cycle is introduced on purpose**, and the fix prompt ("extract the shared piece into a third module") is spelled out because that is the lesson, not just the workaround.
